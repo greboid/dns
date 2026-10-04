@@ -12,13 +12,13 @@ import (
 )
 
 type File struct {
-	Snippets map[string]snippets.Snippet `yaml:"snippets"`
-	Domains  map[string]Domain           `yaml:"domains"`
+	Snippets map[string]snippets.Snippet `yaml:"snippets,omitempty"`
+	Domains  map[string]Domain           `yaml:"domains,omitempty"`
 }
 
 type Domain struct {
-	Snippets []SnippetRef `yaml:"snippets"`
-	Records  []RecordRef  `yaml:"records"`
+	Snippets []SnippetRef `yaml:"snippets,omitempty"`
+	Records  []RecordRef  `yaml:"records,omitempty"`
 }
 
 type SnippetRef struct {
@@ -47,6 +47,15 @@ func (s *SnippetRef) UnmarshalYAML(value *yaml.Node) error {
 	}
 }
 
+// MarshalYAML emits the shapes UnmarshalYAML accepts: a bare snippet name, or
+// a single-entry mapping of name to expanded record names.
+func (s SnippetRef) MarshalYAML() (interface{}, error) {
+	if len(s.Names) == 0 {
+		return s.Name, nil
+	}
+	return map[string][]string{s.Name: s.Names}, nil
+}
+
 type RecordRef struct {
 	Record       snippets.Record
 	IsSnippetRef bool
@@ -64,14 +73,20 @@ func (r *RecordRef) UnmarshalYAML(value *yaml.Node) error {
 		if err := value.Decode(&rec); err != nil {
 			return fmt.Errorf("invalid record: %w", err)
 		}
-		if rec.Name == "@" {
-			rec.Name = ""
-		}
 		r.Record = rec
 		return nil
 	default:
 		return fmt.Errorf("record reference must be a string or mapping")
 	}
+}
+
+// MarshalYAML emits the shapes UnmarshalYAML accepts: a bare snippet name or
+// an inline record mapping.
+func (r RecordRef) MarshalYAML() (interface{}, error) {
+	if r.IsSnippetRef {
+		return r.SnippetName, nil
+	}
+	return r.Record, nil
 }
 
 func Load(path string) (*File, error) {
@@ -102,14 +117,11 @@ func (f *File) ExpandRecords(domainName string) ([]snippets.Record, error) {
 		}
 		if len(snippet.Records) == 1 && snippet.Records[0].Name == "*" && len(ref.Names) > 0 {
 			for _, name := range ref.Names {
-				r := snippet.Records[0]
-				records = append(records, snippets.Record{
-					Name:     name,
-					Type:     r.Type,
-					Content:  r.Content,
-					TTL:      r.TTL,
-					Priority: r.Priority,
-				})
+				// Resolve applies {domain} substitution to the content;
+				// the listed name always wins over the wildcard.
+				resolved := snippet.Records[0].Resolve(domainName)
+				resolved.Name = name
+				records = append(records, resolved)
 			}
 		} else {
 			for _, r := range snippet.Records {

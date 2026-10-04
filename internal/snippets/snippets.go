@@ -2,6 +2,8 @@ package snippets
 
 import (
 	"strings"
+
+	"gopkg.in/yaml.v3"
 )
 
 type Snippet struct {
@@ -15,6 +17,30 @@ type Record struct {
 	Content  string `yaml:"content"`
 	TTL      *int   `yaml:"ttl,omitempty"`
 	Priority *int   `yaml:"priority,omitempty"`
+}
+
+// MarshalYAML emits "@" for apex records (empty name); UnmarshalYAML converts
+// it back so apex records always use "" internally.
+func (r Record) MarshalYAML() (interface{}, error) {
+	type raw Record
+	out := raw(r)
+	if out.Name == "" {
+		out.Name = "@"
+	}
+	return out, nil
+}
+
+func (r *Record) UnmarshalYAML(value *yaml.Node) error {
+	type raw Record
+	var out raw
+	if err := value.Decode(&out); err != nil {
+		return err
+	}
+	if out.Name == "@" {
+		out.Name = ""
+	}
+	*r = Record(out)
+	return nil
 }
 
 func (r Record) Resolve(domain string) Record {

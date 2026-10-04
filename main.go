@@ -15,25 +15,38 @@ import (
 	"github.com/greboid/dns-dashboard/internal/config"
 	"github.com/greboid/dns-dashboard/internal/diff"
 	"github.com/greboid/dns-dashboard/internal/dns"
+	"github.com/greboid/dns-dashboard/internal/pull"
+	"gopkg.in/yaml.v3"
 )
 
 func main() {
 	apiUser := flag.String("api-user", "", "mydnshost API user (email)")
 	apiKey := flag.String("api-key", "", "mydnshost API key")
 	configPath := flag.String("config", "domains.yaml", "path to domain config YAML")
+	pullMode := flag.Bool("pull", false, "pull all domains and records from the remote and generate the config")
+	force := flag.Bool("force", false, "with -pull, overwrite an existing config")
+	minShared := flag.Int("min-shared", 2, "with -pull, minimum domains sharing a record before it becomes a snippet")
+	wildcardTypes := flag.String("wildcard-types", "A,RRCLONE", "with -pull, comma-separated record types eligible for wildcard (names-list) snippets")
 	flag.Parse()
 
 	if *apiUser == "" || *apiKey == "" {
 		log.Fatal("both -api-user and -api-key flags are required")
 	}
 
+	client := dns.NewClient(*apiUser, *apiKey)
+	ctx := context.Background()
+
+	if *pullMode {
+		if err := runPull(ctx, client, *configPath, *force, *minShared, parseTypes(*wildcardTypes)); err != nil {
+			log.Fatalf("pull: %v", err)
+		}
+		return
+	}
+
 	cfg, err := config.Load(*configPath)
 	if err != nil {
 		log.Fatalf("loading config: %v", err)
 	}
-
-	client := dns.NewClient(*apiUser, *apiKey)
-	ctx := context.Background()
 
 	diffs := collectDiffs(ctx, cfg, client)
 
@@ -55,6 +68,88 @@ func main() {
 	}
 
 	applyChanges(ctx, client, diffs)
+}
+
+func runPull(ctx context.Context, client *dns.Client, path string, force bool, minShared int, wildcardTypes map[string]bool) error {
+	if !force {
+		if _, err := os.Stat(path); err == nil {
+			return fmt.Errorf("%s already exists (use -force to overwrite)", path)
+		}
+	}
+
+	domains, err := client.ListDomains(ctx)
+	if err != nil {
+		return fmt.Errorf("listing domains: %w", err)
+	}
+
+	records := make(map[string][]dns.Record)
+	disabled := 0
+	for _, d := range domains {
+		rs, err := client.GetRecords(ctx, d.Name)
+		if err != nil {
+			return fmt.Errorf("fetching records for %s: %w", d.Name, err)
+		}
+		for _, r := range rs {
+			if r.Disabled {
+				disabled++
+			}
+		}
+		records[d.Name] = rs
+		fmt.Fprintf(os.Stderr, "pulled %s (%d records)\n", d.Name, len(rs))
+	}
+
+	cfg, err := pull.Generate(records, pull.Options{MinShared: minShared, WildcardTypes: wildcardTypes})
+	if err != nil {
+		return fmt.Errorf("generating config: %w", err)
+	}
+
+	f, err := os.Create(path)
+	if err != nil {
+		return fmt.Errorf("creating %s: %w", path, err)
+	}
+	defer f.Close()
+	enc := yaml.NewEncoder(f)
+	enc.SetIndent(2)
+	if err := enc.Encode(cfg); err != nil {
+		return fmt.Errorf("encoding config: %w", err)
+	}
+	if err := enc.Close(); err != nil {
+		return fmt.Errorf("encoding config: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("writing %s: %w", path, err)
+	}
+
+	// Verify the generated config parses and expands cleanly.
+	loaded, err := config.Load(path)
+	if err != nil {
+		return fmt.Errorf("verifying generated config: %w", err)
+	}
+	for _, name := range loaded.DomainNames() {
+		if _, err := loaded.ExpandRecords(name); err != nil {
+			return fmt.Errorf("verifying generated config: expanding %s: %w", name, err)
+		}
+	}
+
+	total := 0
+	for _, rs := range records {
+		total += len(rs)
+	}
+	fmt.Fprintf(os.Stdout, "wrote %s: %d domains, %d snippets, %d records\n", path, len(domains), len(cfg.Snippets), total)
+	if disabled > 0 {
+		fmt.Fprintf(os.Stdout, "warning: %d disabled records were pulled as normal records; the config format cannot represent the disabled state\n", disabled)
+	}
+	return nil
+}
+
+func parseTypes(s string) map[string]bool {
+	types := make(map[string]bool)
+	for _, t := range strings.Split(s, ",") {
+		if t = strings.TrimSpace(t); t != "" {
+			types[strings.ToUpper(t)] = true
+		}
+	}
+	return types
 }
 
 func collectDiffs(ctx context.Context, cfg *config.File, client *dns.Client) []diff.Diff {
