@@ -1,10 +1,3 @@
-// Package pull generates a domains.yaml config from the records that exist
-// on the remote DNS provider.
-//
-// Records are normalised by replacing occurrences of the owning domain with
-// the {domain} placeholder, then grouped. Any record group that appears in
-// enough domains (default 2) is promoted to a shared snippet; the rest stay
-// inline in their domain.
 package pull
 
 import (
@@ -23,26 +16,17 @@ const domainPlaceholder = "{domain}"
 
 // Options controls how the config is generated.
 type Options struct {
-	// MinShared is the minimum number of domains a record must appear in
-	// (after {domain} normalisation) before it is promoted to a snippet.
-	// Values below 2 are treated as 2.
-	MinShared int
-
-	// WildcardTypes are the record types eligible for wildcard snippets:
-	// records with identical type and content appearing at several names
-	// are emitted as one "*" snippet that each domain expands with its own
-	// names list. A nil map defaults to A and RRCLONE.
+	MinShared     int
 	WildcardTypes map[string]bool
+	MergeSnippets bool
 }
 
-// recordSig is a normalised record identity: everything that two records must
-// agree on to be considered "the same record" across domains.
 type recordSig struct {
 	Name     string
 	Type     string
 	Content  string
 	TTL      int
-	Priority int // -1 when unset
+	Priority int
 }
 
 func sigOf(r dns.Record) recordSig {
@@ -73,9 +57,6 @@ func (s recordSig) less(other recordSig) int {
 	)
 }
 
-// Generate builds a config from remote records. The map is keyed by domain
-// name. Snippet names are derived deterministically from the record, so the
-// same remote state always produces the same config.
 func Generate(records map[string][]dns.Record, opts Options) (*config.File, error) {
 	if opts.MinShared < 2 {
 		opts.MinShared = 2
@@ -101,10 +82,8 @@ func Generate(records map[string][]dns.Record, opts Options) (*config.File, erro
 		}
 	}
 
-	// Promote wildcard candidates first: records of a wildcard-eligible
-	// type with identical content (and TTL/priority) that appear at several
-	// names become one "*" snippet, expanded per domain via a names list.
 	snippetsOut := make(map[string]snippets.Snippet)
+	wildcardTypes := make(map[string]string) // snippet name -> record type
 	wildcardSigs := make(map[recordSig]bool)
 	wildcardRefs := make(map[string][]config.SnippetRef)
 
@@ -146,8 +125,7 @@ func Generate(records map[string][]dns.Record, opts Options) (*config.File, erro
 		if len(domains) < opts.MinShared {
 			continue
 		}
-		// Every domain having the same single name means the scalar snippet
-		// path below produces a cleaner config; leave those sigs alone.
+
 		uniformSingle := true
 		var singleName string
 		for _, names := range namesByDomain {
@@ -175,9 +153,9 @@ func Generate(records map[string][]dns.Record, opts Options) (*config.File, erro
 		rec := snippetRecord(sigs[0])
 		rec.Name = "*"
 		snippetsOut[name] = snippets.Snippet{
-			Description: fmt.Sprintf("%s records shared by %d domains", k.typ, len(domains)),
-			Records:     []snippets.Record{rec},
+			Records: []snippets.Record{rec},
 		}
+		wildcardTypes[name] = k.typ
 		for _, sig := range sigs {
 			wildcardSigs[sig] = true
 		}
@@ -187,13 +165,6 @@ func Generate(records map[string][]dns.Record, opts Options) (*config.File, erro
 		}
 	}
 
-	// Promote signatures shared by enough domains to snippets, in sorted
-	// order so name suffixes on collision are deterministic. Signatures of
-	// the same type that are shared by exactly the same set of domains are
-	// combined into a single multi-record snippet, even when their names
-	// differ (e.g. the fm1/fm2/fm3._domainkey DKIM CNAMEs). Snippets whose
-	// records share one name are named after it ("a-apex", "ns-apex");
-	// groups spanning several names fall back to the bare type ("cname").
 	sigToSnippet := make(map[recordSig]string)
 
 	type group struct {
@@ -211,7 +182,10 @@ func Generate(records map[string][]dns.Record, opts Options) (*config.File, erro
 		if len(domains) < opts.MinShared {
 			continue
 		}
-		key := sig.Type + "\x00" + strings.Join(domains, "\x00")
+		key := strings.Join(domains, "\x00")
+		if !opts.MergeSnippets {
+			key = sig.Type + "\x00" + key
+		}
 		g, ok := groups[key]
 		if !ok {
 			g = &group{domains: domains}
@@ -223,23 +197,12 @@ func Generate(records map[string][]dns.Record, opts Options) (*config.File, erro
 
 	for _, key := range groupOrder {
 		g := groups[key]
-		names := make(map[string]bool)
-		for _, sig := range g.sigs {
-			names[sig.Name] = true
-		}
-		base := slugify(g.sigs[0].Type)
-		if len(names) == 1 {
-			base = snippetName(g.sigs[0])
-		}
-		name := uniqueSnippetName(snippetsOut, base)
+		name := uniqueSnippetName(snippetsOut, mergedSnippetName(g.sigs))
 		recs := make([]snippets.Record, 0, len(g.sigs))
 		for _, sig := range g.sigs {
 			recs = append(recs, snippetRecord(sig))
 		}
-		snippetsOut[name] = snippets.Snippet{
-			Description: fmt.Sprintf("Shared by %d domains", len(g.domains)),
-			Records:     recs,
-		}
+		snippetsOut[name] = snippets.Snippet{Records: recs}
 		for _, sig := range g.sigs {
 			sigToSnippet[sig] = name
 		}
@@ -274,11 +237,24 @@ func Generate(records map[string][]dns.Record, opts Options) (*config.File, erro
 		domainsOut[domain] = d
 	}
 
+	usage := make(map[string]int, len(snippetsOut))
+	for _, d := range domainsOut {
+		for _, ref := range d.Snippets {
+			usage[ref.Name]++
+		}
+	}
+	for name, s := range snippetsOut {
+		if typ, ok := wildcardTypes[name]; ok {
+			s.Description = fmt.Sprintf("%s records shared by %d domains", typ, usage[name])
+		} else {
+			s.Description = fmt.Sprintf("Shared by %d domains", usage[name])
+		}
+		snippetsOut[name] = s
+	}
+
 	return &config.File{Snippets: snippetsOut, Domains: domainsOut}, nil
 }
 
-// normalise rewrites occurrences of the owning domain in the name and content
-// into the {domain} placeholder so identical relative records compare equal.
 func normalise(sig recordSig, domain string) recordSig {
 	return recordSig{
 		Name:     templatabise(sig.Name, domain),
@@ -289,13 +265,6 @@ func normalise(sig recordSig, domain string) recordSig {
 	}
 }
 
-// templatabise rewrites occurrences of the owning domain in the name and
-// content into the {domain} placeholder so identical relative records
-// compare equal. The domain is recognised wherever it is delimited by
-// non-hostname characters: as a whole label at either end or in the middle
-// (fm1.example.com.dkim.fmhosted.com), in a mailto address
-// (rua=mailto:reports@example.com), or after an SPF mechanism prefix
-// (a:example.com).
 func templatabise(s, domain string) string {
 	var b strings.Builder
 	for i := 0; i < len(s); {
@@ -310,9 +279,6 @@ func templatabise(s, domain string) string {
 	return b.String()
 }
 
-// atBoundary reports whether the domain-sized slice at start is delimited:
-// the characters either side must be outside the string or non-hostname
-// characters, so the domain is never matched inside a larger name.
 func atBoundary(s string, start, length int) bool {
 	if start > 0 && isHostChar(s[start-1]) {
 		return false
@@ -323,8 +289,6 @@ func atBoundary(s string, start, length int) bool {
 	return true
 }
 
-// isHostChar reports whether c can appear in a DNS label (and therefore
-// glues the domain into a larger name rather than delimiting it).
 func isHostChar(c byte) bool {
 	switch {
 	case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
@@ -353,8 +317,27 @@ func snippetRecord(sig recordSig) snippets.Record {
 	return rec
 }
 
-// snippetName derives a readable snippet name from the record, e.g. "a-apex"
-// or "cname-www".
+func mergedSnippetName(sigs []recordSig) string {
+	types := make(map[string]bool)
+	names := make(map[string]bool)
+	for _, sig := range sigs {
+		types[sig.Type] = true
+		names[sig.Name] = true
+	}
+	if len(types) == 1 {
+		if len(names) == 1 {
+			return snippetName(sigs[0])
+		}
+		return slugify(sigs[0].Type)
+	}
+	slugs := make([]string, 0, len(types))
+	for t := range types {
+		slugs = append(slugs, slugify(t))
+	}
+	slices.Sort(slugs)
+	return strings.Join(slugs, "-")
+}
+
 func snippetName(sig recordSig) string {
 	name := sig.Name
 	switch {
@@ -389,7 +372,6 @@ func slugify(s string) string {
 	return out
 }
 
-// displayName renders a record name for the config: "@" for the apex.
 func displayName(name string) string {
 	if name == "" {
 		return "@"
@@ -397,8 +379,6 @@ func displayName(name string) string {
 	return name
 }
 
-// wildcardSlug derives the name suffix of a wildcard snippet from its
-// record content, e.g. an A record on 203.0.113.10 becomes "a-203-0-113-10".
 func wildcardSlug(content string) string {
 	if content == "@" {
 		return "apex"

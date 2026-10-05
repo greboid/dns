@@ -47,9 +47,7 @@ func (s *SnippetRef) UnmarshalYAML(value *yaml.Node) error {
 	}
 }
 
-// MarshalYAML emits the shapes UnmarshalYAML accepts: a bare snippet name, or
-// a single-entry mapping of name to expanded record names.
-func (s SnippetRef) MarshalYAML() (interface{}, error) {
+func (s *SnippetRef) MarshalYAML() (any, error) {
 	if len(s.Names) == 0 {
 		return s.Name, nil
 	}
@@ -80,9 +78,7 @@ func (r *RecordRef) UnmarshalYAML(value *yaml.Node) error {
 	}
 }
 
-// MarshalYAML emits the shapes UnmarshalYAML accepts: a bare snippet name or
-// an inline record mapping.
-func (r RecordRef) MarshalYAML() (interface{}, error) {
+func (r *RecordRef) MarshalYAML() (any, error) {
 	if r.IsSnippetRef {
 		return r.SnippetName, nil
 	}
@@ -117,8 +113,6 @@ func (f *File) ExpandRecords(domainName string) ([]snippets.Record, error) {
 		}
 		if len(snippet.Records) == 1 && snippet.Records[0].Name == "*" && len(ref.Names) > 0 {
 			for _, name := range ref.Names {
-				// Resolve applies {domain} substitution to the content;
-				// the listed name always wins over the wildcard.
 				resolved := snippet.Records[0].Resolve(domainName)
 				resolved.Name = name
 				records = append(records, resolved)

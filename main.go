@@ -27,6 +27,7 @@ func main() {
 	force := flag.Bool("force", false, "with -pull, overwrite an existing config")
 	minShared := flag.Int("min-shared", 2, "with -pull, minimum domains sharing a record before it becomes a snippet")
 	wildcardTypes := flag.String("wildcard-types", "A,RRCLONE", "with -pull, comma-separated record types eligible for wildcard (names-list) snippets")
+	mergeSnippets := flag.Bool("merge-snippets", true, "with -pull, also combine snippets referenced by the same set of domains into one")
 	flag.Parse()
 
 	if *apiUser == "" || *apiKey == "" {
@@ -37,7 +38,7 @@ func main() {
 	ctx := context.Background()
 
 	if *pullMode {
-		if err := runPull(ctx, client, *configPath, *force, *minShared, parseTypes(*wildcardTypes)); err != nil {
+		if err := runPull(ctx, client, *configPath, *force, *minShared, parseTypes(*wildcardTypes), *mergeSnippets); err != nil {
 			log.Fatalf("pull: %v", err)
 		}
 		return
@@ -67,10 +68,10 @@ func main() {
 		return
 	}
 
-	applyChanges(ctx, client, diffs)
+	applyChanges(ctx, cfg, client, diffs)
 }
 
-func runPull(ctx context.Context, client *dns.Client, path string, force bool, minShared int, wildcardTypes map[string]bool) error {
+func runPull(ctx context.Context, client *dns.Client, path string, force bool, minShared int, wildcardTypes map[string]bool, mergeSnippets bool) error {
 	if !force {
 		if _, err := os.Stat(path); err == nil {
 			return fmt.Errorf("%s already exists (use -force to overwrite)", path)
@@ -98,7 +99,7 @@ func runPull(ctx context.Context, client *dns.Client, path string, force bool, m
 		fmt.Fprintf(os.Stderr, "pulled %s (%d records)\n", d.Name, len(rs))
 	}
 
-	cfg, err := pull.Generate(records, pull.Options{MinShared: minShared, WildcardTypes: wildcardTypes})
+	cfg, err := pull.Generate(records, pull.Options{MinShared: minShared, WildcardTypes: wildcardTypes, MergeSnippets: mergeSnippets})
 	if err != nil {
 		return fmt.Errorf("generating config: %w", err)
 	}
@@ -120,7 +121,6 @@ func runPull(ctx context.Context, client *dns.Client, path string, force bool, m
 		return fmt.Errorf("writing %s: %w", path, err)
 	}
 
-	// Verify the generated config parses and expands cleanly.
 	loaded, err := config.Load(path)
 	if err != nil {
 		return fmt.Errorf("verifying generated config: %w", err)
@@ -144,7 +144,7 @@ func runPull(ctx context.Context, client *dns.Client, path string, force bool, m
 
 func parseTypes(s string) map[string]bool {
 	types := make(map[string]bool)
-	for _, t := range strings.Split(s, ",") {
+	for t := range strings.SplitSeq(s, ",") {
 		if t = strings.TrimSpace(t); t != "" {
 			types[strings.ToUpper(t)] = true
 		}
@@ -153,8 +153,12 @@ func parseTypes(s string) map[string]bool {
 }
 
 func collectDiffs(ctx context.Context, cfg *config.File, client *dns.Client) []diff.Diff {
+	return collectDomainDiffs(ctx, cfg, client, cfg.DomainNames())
+}
+
+func collectDomainDiffs(ctx context.Context, cfg *config.File, client *dns.Client, domains []string) []diff.Diff {
 	var diffs []diff.Diff
-	for _, name := range cfg.DomainNames() {
+	for _, name := range domains {
 		desired, err := cfg.ExpandRecords(name)
 		if err != nil {
 			log.Fatalf("expanding domain %s: %v", name, err)
@@ -171,11 +175,13 @@ func collectDiffs(ctx context.Context, cfg *config.File, client *dns.Client) []d
 	return diffs
 }
 
-func applyChanges(ctx context.Context, client *dns.Client, diffs []diff.Diff) {
+func applyChanges(ctx context.Context, cfg *config.File, client *dns.Client, diffs []diff.Diff) {
+	var touched []string
 	for _, d := range diffs {
 		if d.Clean() {
 			continue
 		}
+		touched = append(touched, d.Domain)
 		fmt.Fprintf(os.Stdout, "Processing %s...\n", d.Domain)
 		for _, r := range d.Extra {
 			fmt.Fprintf(os.Stdout, "  Removing %s %s %s\n", r.Name, r.Type, r.Content)
@@ -185,16 +191,45 @@ func applyChanges(ctx context.Context, client *dns.Client, diffs []diff.Diff) {
 		}
 		for _, r := range d.Missing {
 			fmt.Fprintf(os.Stdout, "  Adding %s %s %s\n", r.Name, r.Type, r.Content)
-			if err := client.AddRecord(ctx, d.Domain, dns.Record{
+			id, err := client.AddRecord(ctx, d.Domain, dns.Record{
 				Name:     r.Name,
 				Type:     r.Type,
 				Content:  r.Content,
 				TTL:      r.TTL,
 				Priority: r.Priority,
-			}); err != nil {
+			})
+			if err != nil {
 				log.Printf("    error adding record: %v", err)
+				continue
+			}
+			if id != nil && *id != 0 {
+				fmt.Fprintf(os.Stdout, "    created as record %d\n", *id)
 			}
 		}
+	}
+
+	if len(touched) == 0 {
+		return
+	}
+
+	fmt.Fprintln(os.Stdout, "Verifying changes...")
+	still := 0
+	for _, d := range collectDomainDiffs(ctx, cfg, client, touched) {
+		if d.Clean() {
+			fmt.Fprintf(os.Stdout, "  %s: clean\n", d.Domain)
+			continue
+		}
+		still++
+		fmt.Fprintf(os.Stdout, "  %s: STILL DIFFERS\n", d.Domain)
+		for _, r := range d.Extra {
+			fmt.Fprintf(os.Stdout, "    + %s %s %s\n", r.Name, r.Type, r.Content)
+		}
+		for _, r := range d.Missing {
+			fmt.Fprintf(os.Stdout, "    - %s %s %s\n", r.Name, r.Type, r.Content)
+		}
+	}
+	if still > 0 {
+		log.Printf("%d domain(s) still differ from the config after applying", still)
 	}
 }
 

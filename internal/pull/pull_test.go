@@ -15,8 +15,6 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-func intPtr(v int) *int { return &v }
-
 func recordSet(records []snippets.Record) map[string]bool {
 	set := make(map[string]bool)
 	for _, r := range records {
@@ -28,36 +26,34 @@ func recordSet(records []snippets.Record) map[string]bool {
 func TestGenerateRoundTrip(t *testing.T) {
 	input := map[string][]dns.Record{
 		"alpha.test": {
-			{Name: "", Type: "A", Content: "203.0.113.10", TTL: intPtr(3600)},
-			{Name: "www", Type: "CNAME", Content: "alpha.test.", TTL: intPtr(3600)},
-			{Name: "", Type: "MX", Content: "mail.alpha.test", TTL: intPtr(3600), Priority: intPtr(10)},
-			{Name: "", Type: "TXT", Content: "alpha-only", TTL: intPtr(300)},
+			{Name: "", Type: "A", Content: "203.0.113.10", TTL: new(3600)},
+			{Name: "www", Type: "CNAME", Content: "alpha.test.", TTL: new(3600)},
+			{Name: "", Type: "MX", Content: "mail.alpha.test", TTL: new(3600), Priority: new(10)},
+			{Name: "", Type: "TXT", Content: "alpha-only", TTL: new(300)},
 		},
 		"beta.test": {
-			{Name: "", Type: "A", Content: "203.0.113.10", TTL: intPtr(3600)},
-			{Name: "www", Type: "CNAME", Content: "beta.test.", TTL: intPtr(3600)},
-			{Name: "", Type: "MX", Content: "mail.beta.test", TTL: intPtr(3600), Priority: intPtr(10)},
+			{Name: "", Type: "A", Content: "203.0.113.10", TTL: new(3600)},
+			{Name: "www", Type: "CNAME", Content: "beta.test.", TTL: new(3600)},
+			{Name: "", Type: "MX", Content: "mail.beta.test", TTL: new(3600), Priority: new(10)},
 		},
 		"gamma.test": {
-			{Name: "", Type: "A", Content: "203.0.113.99", TTL: intPtr(3600)},
+			{Name: "", Type: "A", Content: "203.0.113.99", TTL: new(3600)},
 		},
 	}
-	// What the remote has, keyed the same way; after Generate -> write ->
-	// Load -> ExpandRecords this must match exactly.
 	expected := map[string][]snippets.Record{
 		"alpha.test": {
-			{Name: "", Type: "A", Content: "203.0.113.10", TTL: intPtr(3600)},
-			{Name: "", Type: "MX", Content: "mail.alpha.test", TTL: intPtr(3600), Priority: intPtr(10)},
-			{Name: "www", Type: "CNAME", Content: "alpha.test.", TTL: intPtr(3600)},
-			{Name: "", Type: "TXT", Content: "alpha-only", TTL: intPtr(300)},
+			{Name: "", Type: "A", Content: "203.0.113.10", TTL: new(3600)},
+			{Name: "", Type: "MX", Content: "mail.alpha.test", TTL: new(3600), Priority: new(10)},
+			{Name: "www", Type: "CNAME", Content: "alpha.test.", TTL: new(3600)},
+			{Name: "", Type: "TXT", Content: "alpha-only", TTL: new(300)},
 		},
 		"beta.test": {
-			{Name: "", Type: "A", Content: "203.0.113.10", TTL: intPtr(3600)},
-			{Name: "", Type: "MX", Content: "mail.beta.test", TTL: intPtr(3600), Priority: intPtr(10)},
-			{Name: "www", Type: "CNAME", Content: "beta.test.", TTL: intPtr(3600)},
+			{Name: "", Type: "A", Content: "203.0.113.10", TTL: new(3600)},
+			{Name: "", Type: "MX", Content: "mail.beta.test", TTL: new(3600), Priority: new(10)},
+			{Name: "www", Type: "CNAME", Content: "beta.test.", TTL: new(3600)},
 		},
 		"gamma.test": {
-			{Name: "", Type: "A", Content: "203.0.113.99", TTL: intPtr(3600)},
+			{Name: "", Type: "A", Content: "203.0.113.99", TTL: new(3600)},
 		},
 	}
 
@@ -66,8 +62,6 @@ func TestGenerateRoundTrip(t *testing.T) {
 		t.Fatalf("Generate: %v", err)
 	}
 
-	// A apex and the templated CNAME/MX are shared by alpha+beta -> snippets;
-	// gamma's different A and alpha's TXT stay inline.
 	if len(cfg.Snippets) != 3 {
 		t.Fatalf("expected 3 snippets, got %d: %v", len(cfg.Snippets), cfg.Snippets)
 	}
@@ -110,13 +104,11 @@ func TestGenerateRoundTrip(t *testing.T) {
 
 func TestGenerateMinSharedThreshold(t *testing.T) {
 	input := map[string][]dns.Record{
-		"alpha.test": {{Name: "", Type: "A", Content: "203.0.113.10", TTL: intPtr(3600)}},
-		"beta.test":  {{Name: "", Type: "A", Content: "203.0.113.10", TTL: intPtr(3600)}},
-		"gamma.test": {{Name: "", Type: "A", Content: "203.0.113.10", TTL: intPtr(3600)}},
+		"alpha.test": {{Name: "", Type: "A", Content: "203.0.113.10", TTL: new(3600)}},
+		"beta.test":  {{Name: "", Type: "A", Content: "203.0.113.10", TTL: new(3600)}},
+		"gamma.test": {{Name: "", Type: "A", Content: "203.0.113.10", TTL: new(3600)}},
 	}
 
-	// Three domains share the record, but the threshold is 4, so nothing is
-	// promoted and every domain keeps an inline record.
 	cfg, err := pull.Generate(input, pull.Options{MinShared: 4})
 	if err != nil {
 		t.Fatalf("Generate: %v", err)
@@ -134,17 +126,15 @@ func TestGenerateMinSharedThreshold(t *testing.T) {
 func TestGenerateSnippetNameCollisions(t *testing.T) {
 	input := map[string][]dns.Record{
 		"alpha.test": {
-			{Name: "", Type: "A", Content: "203.0.113.10", TTL: intPtr(3600)},
-			{Name: "", Type: "A", Content: "203.0.113.11", TTL: intPtr(3600)},
+			{Name: "", Type: "A", Content: "203.0.113.10", TTL: new(3600)},
+			{Name: "", Type: "A", Content: "203.0.113.11", TTL: new(3600)},
 		},
 		"beta.test": {
-			{Name: "", Type: "A", Content: "203.0.113.10", TTL: intPtr(3600)},
-			{Name: "", Type: "A", Content: "203.0.113.11", TTL: intPtr(3600)},
+			{Name: "", Type: "A", Content: "203.0.113.10", TTL: new(3600)},
+			{Name: "", Type: "A", Content: "203.0.113.11", TTL: new(3600)},
 		},
 	}
 
-	// Same type and name, shared by the same domains: both records merge
-	// into one snippet instead of becoming a-apex and a-apex-2.
 	cfg, err := pull.Generate(input, pull.Options{})
 	if err != nil {
 		t.Fatalf("Generate: %v", err)
@@ -171,7 +161,7 @@ func TestGenerateSnippetNameCollisions(t *testing.T) {
 
 func TestGenerateMergesSharedNSTypes(t *testing.T) {
 	ns := func(content string) dns.Record {
-		return dns.Record{Name: "", Type: "NS", Content: content, TTL: intPtr(86400)}
+		return dns.Record{Name: "", Type: "NS", Content: content, TTL: new(86400)}
 	}
 	domainRecords := func() []dns.Record {
 		return []dns.Record{ns("ns1.mydnshost.co.uk"), ns("ns2.mydnshost.co.uk"), ns("ns3.mydnshost.co.uk"), ns("ns4.mydnshost.co.uk")}
@@ -215,10 +205,10 @@ func TestGenerateMergesSharedNSTypes(t *testing.T) {
 			t.Fatalf("ExpandRecords(%s): %v", domain, err)
 		}
 		want := recordSet([]snippets.Record{
-			{Name: "", Type: "NS", Content: "ns1.mydnshost.co.uk", TTL: intPtr(86400)},
-			{Name: "", Type: "NS", Content: "ns2.mydnshost.co.uk", TTL: intPtr(86400)},
-			{Name: "", Type: "NS", Content: "ns3.mydnshost.co.uk", TTL: intPtr(86400)},
-			{Name: "", Type: "NS", Content: "ns4.mydnshost.co.uk", TTL: intPtr(86400)},
+			{Name: "", Type: "NS", Content: "ns1.mydnshost.co.uk", TTL: new(86400)},
+			{Name: "", Type: "NS", Content: "ns2.mydnshost.co.uk", TTL: new(86400)},
+			{Name: "", Type: "NS", Content: "ns3.mydnshost.co.uk", TTL: new(86400)},
+			{Name: "", Type: "NS", Content: "ns4.mydnshost.co.uk", TTL: new(86400)},
 		})
 		if !maps.Equal(recordSet(got), want) {
 			t.Errorf("%s: expanded records %v do not match original", domain, got)
@@ -227,8 +217,8 @@ func TestGenerateMergesSharedNSTypes(t *testing.T) {
 }
 
 func TestGenerateSeparatesRecordsWithDifferentDomainSets(t *testing.T) {
-	googleMx := dns.Record{Name: "", Type: "MX", Content: "smtp.google.com", TTL: intPtr(3600), Priority: intPtr(10)}
-	fastmailMx := dns.Record{Name: "", Type: "MX", Content: "in1-smtp.messagingengine.com", TTL: intPtr(3600), Priority: intPtr(10)}
+	googleMx := dns.Record{Name: "", Type: "MX", Content: "smtp.google.com", TTL: new(3600), Priority: new(10)}
+	fastmailMx := dns.Record{Name: "", Type: "MX", Content: "in1-smtp.messagingengine.com", TTL: new(3600), Priority: new(10)}
 	input := map[string][]dns.Record{
 		"alpha.test": {googleMx},
 		"beta.test":  {googleMx},
@@ -236,8 +226,6 @@ func TestGenerateSeparatesRecordsWithDifferentDomainSets(t *testing.T) {
 		"delta.test": {fastmailMx},
 	}
 
-	// Same type/name but different domain sets must stay separate snippets,
-	// otherwise every domain would receive MX records it never had.
 	cfg, err := pull.Generate(input, pull.Options{})
 	if err != nil {
 		t.Fatalf("Generate: %v", err)
@@ -265,12 +253,12 @@ func TestGenerateSeparatesRecordsWithDifferentDomainSets(t *testing.T) {
 func TestGenerateOutputFormat(t *testing.T) {
 	input := map[string][]dns.Record{
 		"alpha.test": {
-			{Name: "", Type: "A", Content: "203.0.113.10", TTL: intPtr(3600)},
-			{Name: "www", Type: "CNAME", Content: "alpha.test.", TTL: intPtr(3600)},
+			{Name: "", Type: "A", Content: "203.0.113.10", TTL: new(3600)},
+			{Name: "www", Type: "CNAME", Content: "alpha.test.", TTL: new(3600)},
 		},
 		"beta.test": {
-			{Name: "", Type: "A", Content: "203.0.113.10", TTL: intPtr(3600)},
-			{Name: "www", Type: "CNAME", Content: "beta.test.", TTL: intPtr(3600)},
+			{Name: "", Type: "A", Content: "203.0.113.10", TTL: new(3600)},
+			{Name: "www", Type: "CNAME", Content: "beta.test.", TTL: new(3600)},
 		},
 	}
 
@@ -288,7 +276,7 @@ func TestGenerateOutputFormat(t *testing.T) {
 	for _, want := range []string{
 		"snippets:",
 		"a-apex:",
-		"name: '@'", // apex emitted as @, not ""
+		"name: '@'",
 		"cname-www:",
 		"content: '{domain}.'",
 		"alpha.test:",
@@ -314,7 +302,7 @@ func writeConfig(t *testing.T, path string, cfg *config.File) {
 
 func TestGenerateWildcardSnippets(t *testing.T) {
 	a := func(name string) dns.Record {
-		return dns.Record{Name: name, Type: "A", Content: "203.0.113.10", TTL: intPtr(3600)}
+		return dns.Record{Name: name, Type: "A", Content: "203.0.113.10", TTL: new(3600)}
 	}
 	input := map[string][]dns.Record{
 		"alpha.test": {a(""), a("www")},
@@ -351,8 +339,6 @@ func TestGenerateWildcardSnippets(t *testing.T) {
 		}
 	}
 
-	// Round-trip: expansion must reproduce the original records, including
-	// the apex "@" mapping back to "".
 	path := filepath.Join(t.TempDir(), "domains.yaml")
 	writeConfig(t, path, cfg)
 	loaded, err := config.Load(path)
@@ -380,15 +366,13 @@ func TestGenerateWildcardSnippets(t *testing.T) {
 }
 
 func TestGenerateWildcardUniformSingleNameStaysScalar(t *testing.T) {
-	a := dns.Record{Name: "", Type: "A", Content: "203.0.113.10", TTL: intPtr(3600)}
+	a := dns.Record{Name: "", Type: "A", Content: "203.0.113.10", TTL: new(3600)}
 	input := map[string][]dns.Record{
 		"alpha.test": {a},
 		"beta.test":  {a},
 		"gamma.test": {a},
 	}
 
-	// Every domain has the same single name: a scalar snippet is cleaner
-	// than a wildcard snippet with singleton names lists.
 	cfg, err := pull.Generate(input, pull.Options{})
 	if err != nil {
 		t.Fatalf("Generate: %v", err)
@@ -409,7 +393,7 @@ func TestGenerateWildcardDifferentContentSeparate(t *testing.T) {
 	a := func(content string, names ...string) []dns.Record {
 		var out []dns.Record
 		for _, n := range names {
-			out = append(out, dns.Record{Name: n, Type: "A", Content: content, TTL: intPtr(3600)})
+			out = append(out, dns.Record{Name: n, Type: "A", Content: content, TTL: new(3600)})
 		}
 		return out
 	}
@@ -436,12 +420,10 @@ func TestGenerateWildcardDifferentContentSeparate(t *testing.T) {
 }
 
 func TestGenerateWildcardDomainPlaceholderContent(t *testing.T) {
-	// RRCLONE records pointing at the owning domain: the {domain} in the
-	// content must be substituted when the wildcard snippet expands.
 	rrclone := func(content string, names ...string) []dns.Record {
 		var out []dns.Record
 		for _, n := range names {
-			out = append(out, dns.Record{Name: n, Type: "RRCLONE", Content: content, TTL: intPtr(3600)})
+			out = append(out, dns.Record{Name: n, Type: "RRCLONE", Content: content, TTL: new(3600)})
 		}
 		return out
 	}
@@ -484,16 +466,13 @@ func TestGenerateWildcardDomainPlaceholderContent(t *testing.T) {
 }
 
 func TestGenerateMergesDKIMPattern(t *testing.T) {
-	// Fastmail-style DKIM CNAMEs: three records per domain whose content is
-	// identical apart from the owning domain appearing mid-string. They must
-	// template into {domain} and merge into one shared snippet.
 	domains := []string{"alpha.test", "beta.test", "gamma.test"}
 	input := make(map[string][]dns.Record)
 	for _, d := range domains {
 		input[d] = []dns.Record{
-			{Name: "fm1._domainkey", Type: "CNAME", Content: "fm1." + d + ".dkim.fmhosted.com", TTL: intPtr(86400)},
-			{Name: "fm2._domainkey", Type: "CNAME", Content: "fm2." + d + ".dkim.fmhosted.com", TTL: intPtr(86400)},
-			{Name: "fm3._domainkey", Type: "CNAME", Content: "fm3." + d + ".dkim.fmhosted.com", TTL: intPtr(86400)},
+			{Name: "fm1._domainkey", Type: "CNAME", Content: "fm1." + d + ".dkim.fmhosted.com", TTL: new(86400)},
+			{Name: "fm2._domainkey", Type: "CNAME", Content: "fm2." + d + ".dkim.fmhosted.com", TTL: new(86400)},
+			{Name: "fm3._domainkey", Type: "CNAME", Content: "fm3." + d + ".dkim.fmhosted.com", TTL: new(86400)},
 		}
 	}
 
@@ -526,7 +505,6 @@ func TestGenerateMergesDKIMPattern(t *testing.T) {
 		}
 	}
 
-	// Round-trip: expansion must reproduce the exact original contents.
 	path := filepath.Join(t.TempDir(), "domains.yaml")
 	writeConfig(t, path, cfg)
 	loaded, err := config.Load(path)
@@ -539,9 +517,9 @@ func TestGenerateMergesDKIMPattern(t *testing.T) {
 			t.Fatalf("ExpandRecords(%s): %v", d, err)
 		}
 		want := recordSet([]snippets.Record{
-			{Name: "fm1._domainkey", Type: "CNAME", Content: "fm1." + d + ".dkim.fmhosted.com", TTL: intPtr(86400)},
-			{Name: "fm2._domainkey", Type: "CNAME", Content: "fm2." + d + ".dkim.fmhosted.com", TTL: intPtr(86400)},
-			{Name: "fm3._domainkey", Type: "CNAME", Content: "fm3." + d + ".dkim.fmhosted.com", TTL: intPtr(86400)},
+			{Name: "fm1._domainkey", Type: "CNAME", Content: "fm1." + d + ".dkim.fmhosted.com", TTL: new(86400)},
+			{Name: "fm2._domainkey", Type: "CNAME", Content: "fm2." + d + ".dkim.fmhosted.com", TTL: new(86400)},
+			{Name: "fm3._domainkey", Type: "CNAME", Content: "fm3." + d + ".dkim.fmhosted.com", TTL: new(86400)},
 		})
 		if !maps.Equal(recordSet(got), want) {
 			t.Errorf("%s: expanded records %v do not match original", d, got)
@@ -550,14 +528,11 @@ func TestGenerateMergesDKIMPattern(t *testing.T) {
 }
 
 func TestGenerateMergesDMARCPattern(t *testing.T) {
-	// DMARC TXT records: identical apart from the owning domain at the end
-	// of a mailto: address. The @ delimiter must template so the record
-	// merges into a shared snippet instead of staying inline per domain.
 	domains := []string{"alpha.test", "beta.test", "gamma.test"}
 	input := make(map[string][]dns.Record)
 	for _, d := range domains {
 		input[d] = []dns.Record{
-			{Name: "", Type: "TXT", Content: "v=DMARC1; p=reject; rua=mailto:dmarc-reports@" + d, TTL: intPtr(86400)},
+			{Name: "", Type: "TXT", Content: "v=DMARC1; p=reject; rua=mailto:dmarc-reports@" + d, TTL: new(86400)},
 		}
 	}
 
@@ -584,7 +559,6 @@ func TestGenerateMergesDMARCPattern(t *testing.T) {
 		}
 	}
 
-	// Round-trip: expansion must reproduce the exact original contents.
 	path := filepath.Join(t.TempDir(), "domains.yaml")
 	writeConfig(t, path, cfg)
 	loaded, err := config.Load(path)
@@ -597,10 +571,97 @@ func TestGenerateMergesDMARCPattern(t *testing.T) {
 			t.Fatalf("ExpandRecords(%s): %v", d, err)
 		}
 		want := recordSet([]snippets.Record{
-			{Name: "", Type: "TXT", Content: "v=DMARC1; p=reject; rua=mailto:dmarc-reports@" + d, TTL: intPtr(86400)},
+			{Name: "", Type: "TXT", Content: "v=DMARC1; p=reject; rua=mailto:dmarc-reports@" + d, TTL: new(86400)},
 		})
 		if !maps.Equal(recordSet(got), want) {
 			t.Errorf("%s: expanded records %v do not match original", d, got)
+		}
+	}
+}
+
+func TestGenerateMergesSnippetsSharedAcrossDomains(t *testing.T) {
+	input := map[string][]dns.Record{
+		"alpha.test": {
+			{Name: "", Type: "NS", Content: "ns1.mydnshost.co.uk", TTL: new(86400)},
+			{Name: "", Type: "NS", Content: "ns2.mydnshost.co.uk", TTL: new(86400)},
+			{Name: "", Type: "TXT", Content: "v=DMARC1; rua=mailto:d@alpha.test", TTL: new(3600)},
+			{Name: "", Type: "MX", Content: "mail.alpha.test", TTL: new(3600), Priority: new(10)},
+			{Name: "", Type: "A", Content: "203.0.113.10", TTL: new(3600)},
+			{Name: "www", Type: "A", Content: "203.0.113.10", TTL: new(3600)},
+		},
+		"beta.test": {
+			{Name: "", Type: "NS", Content: "ns1.mydnshost.co.uk", TTL: new(86400)},
+			{Name: "", Type: "NS", Content: "ns2.mydnshost.co.uk", TTL: new(86400)},
+			{Name: "", Type: "TXT", Content: "v=DMARC1; rua=mailto:d@beta.test", TTL: new(3600)},
+			{Name: "", Type: "MX", Content: "mail.beta.test", TTL: new(3600), Priority: new(10)},
+			{Name: "", Type: "A", Content: "203.0.113.10", TTL: new(3600)},
+			{Name: "www", Type: "A", Content: "203.0.113.10", TTL: new(3600)},
+		},
+	}
+
+	cfg, err := pull.Generate(input, pull.Options{MergeSnippets: true})
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	if len(cfg.Snippets) != 2 {
+		t.Fatalf("expected 2 snippets, got %d: %v", len(cfg.Snippets), cfg.Snippets)
+	}
+	merged, ok := cfg.Snippets["mx-ns-txt"]
+	if !ok {
+		t.Fatalf("missing merged snippet mx-ns-txt, have %v", cfg.Snippets)
+	}
+	if len(merged.Records) != 4 {
+		t.Errorf("expected 4 records in merged snippet, got %d", len(merged.Records))
+	}
+	if _, ok := cfg.Snippets["a-203-0-113-10"]; !ok {
+		t.Errorf("missing wildcard snippet a-203-0-113-10")
+	}
+	for _, d := range []string{"alpha.test", "beta.test"} {
+		refs := cfg.Domains[d].Snippets
+		if len(refs) != 2 {
+			t.Errorf("%s: expected 2 snippet refs, got %d", d, len(refs))
+		}
+		for _, ref := range refs {
+			if len(ref.Names) != 0 && ref.Name != "a-203-0-113-10" {
+				t.Errorf("%s: unexpected names on scalar ref %s", d, ref.Name)
+			}
+		}
+		if len(cfg.Domains[d].Records) != 0 {
+			t.Errorf("%s: expected no inline records", d)
+		}
+	}
+
+	path := filepath.Join(t.TempDir(), "domains.yaml")
+	writeConfig(t, path, cfg)
+	loaded, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	for _, d := range []string{"alpha.test", "beta.test"} {
+		got, err := loaded.ExpandRecords(d)
+		if err != nil {
+			t.Fatalf("ExpandRecords(%s): %v", d, err)
+		}
+		want := recordSet([]snippets.Record{
+			{Name: "", Type: "NS", Content: "ns1.mydnshost.co.uk", TTL: new(86400)},
+			{Name: "", Type: "NS", Content: "ns2.mydnshost.co.uk", TTL: new(86400)},
+			{Name: "", Type: "TXT", Content: "v=DMARC1; rua=mailto:d@" + d, TTL: new(3600)},
+			{Name: "", Type: "MX", Content: "mail." + d, TTL: new(3600), Priority: new(10)},
+			{Name: "", Type: "A", Content: "203.0.113.10", TTL: new(3600)},
+			{Name: "www", Type: "A", Content: "203.0.113.10", TTL: new(3600)},
+		})
+		if !maps.Equal(recordSet(got), want) {
+			t.Errorf("%s: expanded records %v do not match original", d, got)
+		}
+	}
+
+	cfgOff, err := pull.Generate(input, pull.Options{})
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	for _, want := range []string{"ns-apex", "txt-apex", "mx-apex", "a-203-0-113-10"} {
+		if _, ok := cfgOff.Snippets[want]; !ok {
+			t.Errorf("MergeSnippets off: missing snippet %s, have %v", want, cfgOff.Snippets)
 		}
 	}
 }

@@ -19,11 +19,9 @@ type Record struct {
 	Priority *int   `yaml:"priority,omitempty"`
 }
 
-// MarshalYAML emits "@" for apex records (empty name); UnmarshalYAML converts
-// it back so apex records always use "" internally.
-func (r Record) MarshalYAML() (interface{}, error) {
+func (r *Record) MarshalYAML() (any, error) {
 	type raw Record
-	out := raw(r)
+	out := r
 	if out.Name == "" {
 		out.Name = "@"
 	}
@@ -43,7 +41,7 @@ func (r *Record) UnmarshalYAML(value *yaml.Node) error {
 	return nil
 }
 
-func (r Record) Resolve(domain string) Record {
+func (r *Record) Resolve(domain string) Record {
 	return Record{
 		Name:     strings.ReplaceAll(r.Name, "{domain}", domain),
 		Type:     r.Type,
