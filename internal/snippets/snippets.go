@@ -7,8 +7,8 @@ import (
 )
 
 type Snippet struct {
-	Description string   `yaml:"description"`
-	Records     []Record `yaml:"records"`
+	Description string    `yaml:"description"`
+	Records     []*Record `yaml:"records"`
 }
 
 type Record struct {
@@ -21,7 +21,7 @@ type Record struct {
 
 func (r *Record) MarshalYAML() (any, error) {
 	type raw Record
-	out := r
+	out := raw(*r)
 	if out.Name == "" {
 		out.Name = "@"
 	}

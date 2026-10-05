@@ -17,8 +17,8 @@ type File struct {
 }
 
 type Domain struct {
-	Snippets []SnippetRef `yaml:"snippets,omitempty"`
-	Records  []RecordRef  `yaml:"records,omitempty"`
+	Snippets []*SnippetRef `yaml:"snippets,omitempty"`
+	Records  []*RecordRef  `yaml:"records,omitempty"`
 }
 
 type SnippetRef struct {
@@ -55,7 +55,7 @@ func (s *SnippetRef) MarshalYAML() (any, error) {
 }
 
 type RecordRef struct {
-	Record       snippets.Record
+	Record       *snippets.Record
 	IsSnippetRef bool
 	SnippetName  string
 }
@@ -67,8 +67,8 @@ func (r *RecordRef) UnmarshalYAML(value *yaml.Node) error {
 		r.SnippetName = value.Value
 		return nil
 	case yaml.MappingNode:
-		var rec snippets.Record
-		if err := value.Decode(&rec); err != nil {
+		rec := &snippets.Record{}
+		if err := value.Decode(rec); err != nil {
 			return fmt.Errorf("invalid record: %w", err)
 		}
 		r.Record = rec
@@ -105,52 +105,66 @@ func (f *File) ExpandRecords(domainName string) ([]snippets.Record, error) {
 	}
 
 	var records []snippets.Record
-
 	for _, ref := range domain.Snippets {
-		snippet, ok := f.Snippets[ref.Name]
-		if !ok {
-			return nil, fmt.Errorf("domain %q: unknown snippet %q", domainName, ref.Name)
+		expanded, err := f.expandSnippetRef(domainName, ref)
+		if err != nil {
+			return nil, err
 		}
-		if len(snippet.Records) == 1 && snippet.Records[0].Name == "*" && len(ref.Names) > 0 {
-			for _, name := range ref.Names {
-				resolved := snippet.Records[0].Resolve(domainName)
-				resolved.Name = name
-				records = append(records, resolved)
-			}
-		} else {
-			for _, r := range snippet.Records {
-				resolved := r.Resolve(domainName)
-				records = append(records, resolved)
-			}
-		}
+		records = append(records, expanded...)
 	}
-
 	for _, ref := range domain.Records {
-		if ref.IsSnippetRef {
-			snippet, ok := f.Snippets[ref.SnippetName]
-			if !ok {
-				return nil, fmt.Errorf("domain %q: unknown snippet %q", domainName, ref.SnippetName)
-			}
-			for _, r := range snippet.Records {
-				resolved := r.Resolve(domainName)
-				records = append(records, resolved)
-			}
-		} else {
-			resolved := ref.Record.Resolve(domainName)
-			records = append(records, resolved)
+		expanded, err := f.expandRecordRef(domainName, ref)
+		if err != nil {
+			return nil, err
 		}
+		records = append(records, expanded...)
 	}
 
 	slices.SortFunc(records, func(a, b snippets.Record) int {
-		if c := cmp.Compare(a.Type, b.Type); c != 0 {
-			return c
-		}
-		if c := cmp.Compare(a.Name, b.Name); c != 0 {
-			return c
-		}
-		return cmp.Compare(a.Content, b.Content)
+		return cmp.Or(
+			cmp.Compare(a.Type, b.Type),
+			cmp.Compare(a.Name, b.Name),
+			cmp.Compare(a.Content, b.Content),
+		)
 	})
 	return records, nil
+}
+
+func (f *File) expandSnippetRef(domainName string, ref *SnippetRef) ([]snippets.Record, error) {
+	snippet, ok := f.Snippets[ref.Name]
+	if !ok {
+		return nil, fmt.Errorf("domain %q: unknown snippet %q", domainName, ref.Name)
+	}
+
+	if len(snippet.Records) == 1 && snippet.Records[0].Name == "*" && len(ref.Names) > 0 {
+		out := make([]snippets.Record, 0, len(ref.Names))
+		for _, name := range ref.Names {
+			resolved := snippet.Records[0].Resolve(domainName)
+			resolved.Name = name
+			out = append(out, resolved)
+		}
+		return out, nil
+	}
+	return f.resolveSnippet(snippet, domainName), nil
+}
+
+func (f *File) expandRecordRef(domainName string, ref *RecordRef) ([]snippets.Record, error) {
+	if ref.IsSnippetRef {
+		snippet, ok := f.Snippets[ref.SnippetName]
+		if !ok {
+			return nil, fmt.Errorf("domain %q: unknown snippet %q", domainName, ref.SnippetName)
+		}
+		return f.resolveSnippet(snippet, domainName), nil
+	}
+	return []snippets.Record{ref.Record.Resolve(domainName)}, nil
+}
+
+func (f *File) resolveSnippet(s snippets.Snippet, domainName string) []snippets.Record {
+	out := make([]snippets.Record, 0, len(s.Records))
+	for _, r := range s.Records {
+		out = append(out, r.Resolve(domainName))
+	}
+	return out
 }
 
 func (f *File) DomainNames() []string {

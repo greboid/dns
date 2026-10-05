@@ -19,8 +19,8 @@ type Record struct {
 }
 
 type Diff struct {
-	Domain string
-	Extra  []Record
+	Domain  string
+	Extra   []Record
 	Missing []Record
 }
 

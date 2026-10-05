@@ -176,6 +176,14 @@ func collectDomainDiffs(ctx context.Context, cfg *config.File, client *dns.Clien
 }
 
 func applyChanges(ctx context.Context, cfg *config.File, client *dns.Client, diffs []diff.Diff) {
+	touched := applyDomainChanges(ctx, client, diffs)
+	if len(touched) == 0 {
+		return
+	}
+	verifyDomains(ctx, cfg, client, touched)
+}
+
+func applyDomainChanges(ctx context.Context, client *dns.Client, diffs []diff.Diff) []string {
 	var touched []string
 	for _, d := range diffs {
 		if d.Clean() {
@@ -183,35 +191,42 @@ func applyChanges(ctx context.Context, cfg *config.File, client *dns.Client, dif
 		}
 		touched = append(touched, d.Domain)
 		fmt.Fprintf(os.Stdout, "Processing %s...\n", d.Domain)
-		for _, r := range d.Extra {
-			fmt.Fprintf(os.Stdout, "  Removing %s %s %s\n", r.Name, r.Type, r.Content)
-			if err := client.RemoveRecord(ctx, d.Domain, r.ID); err != nil {
-				log.Printf("    error removing record: %v", err)
-			}
-		}
-		for _, r := range d.Missing {
-			fmt.Fprintf(os.Stdout, "  Adding %s %s %s\n", r.Name, r.Type, r.Content)
-			id, err := client.AddRecord(ctx, d.Domain, dns.Record{
-				Name:     r.Name,
-				Type:     r.Type,
-				Content:  r.Content,
-				TTL:      r.TTL,
-				Priority: r.Priority,
-			})
-			if err != nil {
-				log.Printf("    error adding record: %v", err)
-				continue
-			}
-			if id != nil && *id != 0 {
-				fmt.Fprintf(os.Stdout, "    created as record %d\n", *id)
-			}
+		removeExtraRecords(ctx, client, d)
+		addMissingRecords(ctx, client, d)
+	}
+	return touched
+}
+
+func removeExtraRecords(ctx context.Context, client *dns.Client, d diff.Diff) {
+	for _, r := range d.Extra {
+		fmt.Fprintf(os.Stdout, "  Removing %s %s %s\n", r.Name, r.Type, r.Content)
+		if err := client.RemoveRecord(ctx, d.Domain, r.ID); err != nil {
+			log.Printf("    error removing record: %v", err)
 		}
 	}
+}
 
-	if len(touched) == 0 {
-		return
+func addMissingRecords(ctx context.Context, client *dns.Client, d diff.Diff) {
+	for _, r := range d.Missing {
+		fmt.Fprintf(os.Stdout, "  Adding %s %s %s\n", r.Name, r.Type, r.Content)
+		id, err := client.AddRecord(ctx, d.Domain, dns.Record{
+			Name:     r.Name,
+			Type:     r.Type,
+			Content:  r.Content,
+			TTL:      r.TTL,
+			Priority: r.Priority,
+		})
+		if err != nil {
+			log.Printf("    error adding record: %v", err)
+			continue
+		}
+		if id != nil && *id != 0 {
+			fmt.Fprintf(os.Stdout, "    created as record %d\n", *id)
+		}
 	}
+}
 
+func verifyDomains(ctx context.Context, cfg *config.File, client *dns.Client, touched []string) {
 	fmt.Fprintln(os.Stdout, "Verifying changes...")
 	still := 0
 	for _, d := range collectDomainDiffs(ctx, cfg, client, touched) {
