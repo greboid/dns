@@ -48,7 +48,10 @@ func main() {
 	if err != nil {
 		log.Fatalf("loading config: %v", err)
 	}
+	runDiffMode(ctx, client, cfg)
+}
 
+func runDiffMode(ctx context.Context, client *dns.Client, cfg *config.File) {
 	diffs := collectDiffs(ctx, cfg, client)
 
 	slices.SortFunc(diffs, func(a, b diff.Diff) int {
@@ -72,23 +75,51 @@ func main() {
 }
 
 func runPull(ctx context.Context, client *dns.Client, path string, force bool, minShared int, wildcardTypes map[string]bool, mergeSnippets bool) error {
-	if !force {
-		if _, err := os.Stat(path); err == nil {
-			return fmt.Errorf("%s already exists (use -force to overwrite)", path)
-		}
+	if err := checkOutputPath(path, force); err != nil {
+		return err
 	}
 
 	domains, err := client.ListDomains(ctx)
 	if err != nil {
 		return fmt.Errorf("listing domains: %w", err)
 	}
+	records, disabled, err := fetchAllRecords(ctx, client, domains)
+	if err != nil {
+		return err
+	}
 
-	records := make(map[string][]dns.Record)
+	cfg, err := pull.Generate(records, pull.Options{MinShared: minShared, WildcardTypes: wildcardTypes, MergeSnippets: mergeSnippets})
+	if err != nil {
+		return fmt.Errorf("generating config: %w", err)
+	}
+	if err := writeConfig(path, cfg); err != nil {
+		return err
+	}
+	if err := verifyConfig(path); err != nil {
+		return err
+	}
+
+	printPullSummary(path, len(domains), cfg, records, disabled)
+	return nil
+}
+
+func checkOutputPath(path string, force bool) error {
+	if force {
+		return nil
+	}
+	if _, err := os.Stat(path); err == nil {
+		return fmt.Errorf("%s already exists (use -force to overwrite)", path)
+	}
+	return nil
+}
+
+func fetchAllRecords(ctx context.Context, client *dns.Client, domains []dns.Domain) (map[string][]dns.Record, int, error) {
+	records := make(map[string][]dns.Record, len(domains))
 	disabled := 0
 	for _, d := range domains {
 		rs, err := client.GetRecords(ctx, d.Name)
 		if err != nil {
-			return fmt.Errorf("fetching records for %s: %w", d.Name, err)
+			return nil, 0, fmt.Errorf("fetching records for %s: %w", d.Name, err)
 		}
 		for _, r := range rs {
 			if r.Disabled {
@@ -98,12 +129,10 @@ func runPull(ctx context.Context, client *dns.Client, path string, force bool, m
 		records[d.Name] = rs
 		fmt.Fprintf(os.Stderr, "pulled %s (%d records)\n", d.Name, len(rs))
 	}
+	return records, disabled, nil
+}
 
-	cfg, err := pull.Generate(records, pull.Options{MinShared: minShared, WildcardTypes: wildcardTypes, MergeSnippets: mergeSnippets})
-	if err != nil {
-		return fmt.Errorf("generating config: %w", err)
-	}
-
+func writeConfig(path string, cfg *config.File) error {
 	f, err := os.Create(path)
 	if err != nil {
 		return fmt.Errorf("creating %s: %w", path, err)
@@ -120,7 +149,10 @@ func runPull(ctx context.Context, client *dns.Client, path string, force bool, m
 	if err := f.Close(); err != nil {
 		return fmt.Errorf("writing %s: %w", path, err)
 	}
+	return nil
+}
 
+func verifyConfig(path string) error {
 	loaded, err := config.Load(path)
 	if err != nil {
 		return fmt.Errorf("verifying generated config: %w", err)
@@ -130,16 +162,22 @@ func runPull(ctx context.Context, client *dns.Client, path string, force bool, m
 			return fmt.Errorf("verifying generated config: expanding %s: %w", name, err)
 		}
 	}
+	return nil
+}
 
+func countRecords(records map[string][]dns.Record) int {
 	total := 0
 	for _, rs := range records {
 		total += len(rs)
 	}
-	fmt.Fprintf(os.Stdout, "wrote %s: %d domains, %d snippets, %d records\n", path, len(domains), len(cfg.Snippets), total)
+	return total
+}
+
+func printPullSummary(path string, domainCount int, cfg *config.File, records map[string][]dns.Record, disabled int) {
+	fmt.Fprintf(os.Stdout, "wrote %s: %d domains, %d snippets, %d records\n", path, domainCount, len(cfg.Snippets), countRecords(records))
 	if disabled > 0 {
 		fmt.Fprintf(os.Stdout, "warning: %d disabled records were pulled as normal records; the config format cannot represent the disabled state\n", disabled)
 	}
-	return nil
 }
 
 func parseTypes(s string) map[string]bool {
@@ -235,16 +273,20 @@ func verifyDomains(ctx context.Context, cfg *config.File, client *dns.Client, to
 			continue
 		}
 		still++
-		fmt.Fprintf(os.Stdout, "  %s: STILL DIFFERS\n", d.Domain)
-		for _, r := range d.Extra {
-			fmt.Fprintf(os.Stdout, "    + %s %s %s\n", r.Name, r.Type, r.Content)
-		}
-		for _, r := range d.Missing {
-			fmt.Fprintf(os.Stdout, "    - %s %s %s\n", r.Name, r.Type, r.Content)
-		}
+		printRemainingDiff(os.Stdout, d)
 	}
 	if still > 0 {
 		log.Printf("%d domain(s) still differ from the config after applying", still)
+	}
+}
+
+func printRemainingDiff(out io.Writer, d diff.Diff) {
+	fmt.Fprintf(out, "  %s: STILL DIFFERS\n", d.Domain)
+	for _, r := range d.Extra {
+		fmt.Fprintf(out, "    + %s %s %s\n", r.Name, r.Type, r.Content)
+	}
+	for _, r := range d.Missing {
+		fmt.Fprintf(out, "    - %s %s %s\n", r.Name, r.Type, r.Content)
 	}
 }
 

@@ -146,22 +146,9 @@ func (g *generator) addWildcardSnippets() {
 }
 
 func (g *generator) addWildcardSnippet(k wildcardKey, sigs []recordSig) {
-	nameSet := make(map[string]bool)
-	namesByDomain := make(map[string]map[string]bool)
-	for _, sig := range sigs {
-		for _, d := range g.bySig[sig] {
-			nameSet[d] = true
-			if namesByDomain[d] == nil {
-				namesByDomain[d] = make(map[string]bool)
-			}
-			namesByDomain[d][displayName(sig.Name)] = true
-		}
-	}
-	domains := slices.Sorted(maps.Keys(nameSet))
-	if len(domains) < g.opts.MinShared {
-		return
-	}
-	if uniformSingleName(namesByDomain) {
+	namesByDomain := g.namesByDomain(sigs)
+	domains := slices.Sorted(maps.Keys(namesByDomain))
+	if len(domains) < g.opts.MinShared || uniformSingleName(namesByDomain) {
 		return
 	}
 
@@ -179,24 +166,43 @@ func (g *generator) addWildcardSnippet(k wildcardKey, sigs []recordSig) {
 	}
 }
 
+func (g *generator) namesByDomain(sigs []recordSig) map[string]map[string]bool {
+	out := make(map[string]map[string]bool)
+	for _, sig := range sigs {
+		for _, d := range g.bySig[sig] {
+			if out[d] == nil {
+				out[d] = make(map[string]bool)
+			}
+			out[d][displayName(sig.Name)] = true
+		}
+	}
+	return out
+}
+
 func uniformSingleName(namesByDomain map[string]map[string]bool) bool {
 	var single string
+	seen := false
 	for _, names := range namesByDomain {
-		if len(names) != 1 {
+		keys := slices.Sorted(maps.Keys(names))
+		if len(keys) != 1 {
 			return false
 		}
-		for name := range names {
-			if single == "" {
-				single = name
-			} else if name != single {
-				return false
-			}
+		if seen && keys[0] != single {
+			return false
 		}
+		single, seen = keys[0], true
 	}
 	return true
 }
 
 func (g *generator) addSharedSnippets() {
+	groups, order := g.groupSharedSigs()
+	for _, key := range order {
+		g.addSharedSnippet(groups[key])
+	}
+}
+
+func (g *generator) groupSharedSigs() (map[string][]recordSig, []string) {
 	groups := make(map[string][]recordSig)
 	var order []string
 	for _, sig := range slices.SortedFunc(maps.Keys(g.bySig), recordSig.less) {
@@ -207,59 +213,81 @@ func (g *generator) addSharedSnippets() {
 		if len(domains) < g.opts.MinShared {
 			continue
 		}
-		key := strings.Join(domains, "\x00")
-		if !g.opts.MergeSnippets {
-			key = sig.Type + "\x00" + key
-		}
+		key := g.sharedGroupKey(sig, domains)
 		if _, ok := groups[key]; !ok {
 			order = append(order, key)
 		}
 		groups[key] = append(groups[key], sig)
 	}
-	for _, key := range order {
-		sigs := groups[key]
-		name := uniqueSnippetName(g.snippets, mergedSnippetName(sigs))
-		recs := make([]*snippets.Record, 0, len(sigs))
-		for _, sig := range sigs {
-			recs = append(recs, snippetRecord(sig))
-		}
-		g.snippets[name] = snippets.Snippet{Records: recs}
-		for _, sig := range sigs {
-			g.sigToSnippet[sig] = name
-		}
+	return groups, order
+}
+
+func (g *generator) sharedGroupKey(sig recordSig, domains []string) string {
+	key := strings.Join(domains, "\x00")
+	if !g.opts.MergeSnippets {
+		key = sig.Type + "\x00" + key
+	}
+	return key
+}
+
+func (g *generator) addSharedSnippet(sigs []recordSig) {
+	name := uniqueSnippetName(g.snippets, mergedSnippetName(sigs))
+	recs := make([]*snippets.Record, 0, len(sigs))
+	for _, sig := range sigs {
+		recs = append(recs, snippetRecord(sig))
+	}
+	g.snippets[name] = snippets.Snippet{Records: recs}
+	for _, sig := range sigs {
+		g.sigToSnippet[sig] = name
 	}
 }
 
 func (g *generator) assembleDomains(domainNames []string) map[string]config.Domain {
 	domainsOut := make(map[string]config.Domain, len(domainNames))
 	for _, domain := range domainNames {
-		var d config.Domain
-		d.Snippets = append(d.Snippets, g.wildcardRefs[domain]...)
-		usedSnippet := make(map[string]bool)
-		var inline []recordSig
-		for _, sig := range g.perDomain[domain] {
-			if g.wildcardSigs[sig] {
-				continue
-			}
-			if name, ok := g.sigToSnippet[sig]; ok {
-				if !usedSnippet[name] {
-					d.Snippets = append(d.Snippets, &config.SnippetRef{Name: name})
-					usedSnippet[name] = true
-				}
-				continue
-			}
-			inline = append(inline, sig)
-		}
-		slices.SortFunc(d.Snippets, func(a, b *config.SnippetRef) int {
-			return cmp.Compare(a.Name, b.Name)
-		})
-		slices.SortFunc(inline, recordSig.less)
-		for _, sig := range inline {
-			d.Records = append(d.Records, &config.RecordRef{Record: snippetRecord(sig)})
-		}
-		domainsOut[domain] = d
+		domainsOut[domain] = g.assembleDomain(domain)
 	}
 	return domainsOut
+}
+
+func (g *generator) assembleDomain(domain string) config.Domain {
+	snippetRefs, inline := g.classifySigs(domain)
+	snippetRefs = append(snippetRefs, g.wildcardRefs[domain]...)
+
+	slices.SortFunc(snippetRefs, func(a, b *config.SnippetRef) int {
+		return cmp.Compare(a.Name, b.Name)
+	})
+	slices.SortFunc(inline, recordSig.less)
+
+	var d config.Domain
+	d.Snippets = snippetRefs
+	for _, sig := range inline {
+		d.Records = append(d.Records, &config.RecordRef{Record: snippetRecord(sig)})
+	}
+	return d
+}
+
+func (g *generator) classifySigs(domain string) (refs []*config.SnippetRef, inline []recordSig) {
+	for _, sig := range g.perDomain[domain] {
+		if g.wildcardSigs[sig] {
+			continue
+		}
+		if name, ok := g.sigToSnippet[sig]; ok {
+			refs = addUniqueRef(refs, name)
+			continue
+		}
+		inline = append(inline, sig)
+	}
+	return refs, inline
+}
+
+func addUniqueRef(refs []*config.SnippetRef, name string) []*config.SnippetRef {
+	for _, ref := range refs {
+		if ref.Name == name {
+			return refs
+		}
+	}
+	return append(refs, &config.SnippetRef{Name: name})
 }
 
 func (g *generator) describeSnippets(domains map[string]config.Domain) map[string]snippets.Snippet {

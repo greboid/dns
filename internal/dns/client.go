@@ -116,24 +116,39 @@ type apiEnvelope struct {
 }
 
 func (c *Client) modifyRecords(ctx context.Context, domain string, ops ...mydnshost.RecordOperation) (*modifyResponse, []byte, error) {
+	payload, err := marshalRecordOps(ops)
+	if err != nil {
+		return nil, nil, err
+	}
+	raw, status, err := c.postRecords(ctx, domain, payload)
+	if err != nil {
+		return nil, nil, err
+	}
+	res, err := decodeModifyResponse(raw, status)
+	if err != nil {
+		return nil, raw, err
+	}
+	return res, raw, nil
+}
+
+func marshalRecordOps(ops []mydnshost.RecordOperation) ([]byte, error) {
 	rawOps := make([]json.RawMessage, len(ops))
 	for i, op := range ops {
 		rawOps[i] = json.RawMessage(op)
 	}
-	payload, err := json.Marshal(struct {
+	return json.Marshal(struct {
 		Data struct {
 			Records []json.RawMessage `json:"records"`
 		} `json:"data"`
 	}{Data: struct {
 		Records []json.RawMessage `json:"records"`
 	}{Records: rawOps}})
-	if err != nil {
-		return nil, nil, err
-	}
+}
 
+func (c *Client) postRecords(ctx context.Context, domain string, payload []byte) (raw []byte, status int, err error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.apiBase+"/domains/"+domain+"/records", bytes.NewReader(payload))
 	if err != nil {
-		return nil, nil, err
+		return nil, 0, err
 	}
 	if c.auth != nil {
 		c.auth.AddHeaders(req)
@@ -141,56 +156,69 @@ func (c *Client) modifyRecords(ctx context.Context, domain string, ops ...mydnsh
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return nil, nil, err
+		return nil, 0, err
 	}
 	defer resp.Body.Close()
-	raw, err := io.ReadAll(resp.Body)
+	raw, err = io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, nil, err
+		return nil, resp.StatusCode, err
 	}
+	return raw, resp.StatusCode, nil
+}
 
+func decodeModifyResponse(raw []byte, status int) (*modifyResponse, error) {
 	envelope := &apiEnvelope{}
 	if err := json.Unmarshal(raw, envelope); err != nil {
-		return nil, raw, fmt.Errorf("unexpected API response (status %d): %s", resp.StatusCode, raw)
+		return nil, fmt.Errorf("unexpected API response (status %d): %s", status, raw)
 	}
 	if envelope.Error != nil {
-		return nil, raw, fmt.Errorf("API error: %s %v", *envelope.Error, envelope.ErrorData)
+		return nil, fmt.Errorf("API error: %s %v", *envelope.Error, envelope.ErrorData)
 	}
 
 	out := &modifyResponse{}
 	if err := json.Unmarshal(envelope.Response, out); err != nil {
-		return nil, raw, fmt.Errorf("unexpected API response (status %d): %s", resp.StatusCode, raw)
+		return nil, fmt.Errorf("unexpected API response (status %d): %s", status, raw)
 	}
-	return out, raw, nil
+	return out, nil
 }
 
 func (c *Client) AddRecord(ctx context.Context, domain string, record Record) (*int, error) {
+	op, err := createRecordPayload(record)
+	if err != nil {
+		return nil, err
+	}
+	res, raw, err := c.modifyRecords(ctx, domain, op)
+	if err != nil {
+		return nil, err
+	}
+	if id, ok := findCreatedID(res, record); ok {
+		return &id, nil
+	}
+	return nil, fmt.Errorf("server did not confirm creating %s record %q on %s (response: %s)", record.Type, record.Content, domain, raw)
+}
+
+func createRecordPayload(record Record) ([]byte, error) {
 	ttl := 0
 	if record.TTL != nil {
 		ttl = *record.TTL
 	}
-	op, err := json.Marshal(createRecordOp{
+	return json.Marshal(createRecordOp{
 		Name:     record.Name,
 		Type:     record.Type,
 		Content:  record.Content,
 		TTL:      ttl,
 		Priority: record.Priority,
 	})
-	if err != nil {
-		return nil, err
-	}
+}
 
-	res, raw, err := c.modifyRecords(ctx, domain, op)
-	if err != nil {
-		return nil, err
-	}
+func findCreatedID(res *modifyResponse, record Record) (int, bool) {
 	for _, changed := range res.Changed {
-		if !changed.Deleted && changed.Type == record.Type && changed.Content == record.Content {
-			id := changed.Id
-			return &id, nil
+		if changed.Deleted || changed.Type != record.Type || changed.Content != record.Content {
+			continue
 		}
+		return changed.Id, true
 	}
-	return nil, fmt.Errorf("server did not confirm creating %s record %q on %s (response: %s)", record.Type, record.Content, domain, raw)
+	return 0, false
 }
 
 func (c *Client) RemoveRecord(ctx context.Context, domain string, recordID int) error {
